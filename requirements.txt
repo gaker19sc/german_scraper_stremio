@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+niquests
+certifi
+packaging
+python-dotenv
+curl_cffi
+patchright
+ffmpeg-python
+rich
+cryptography

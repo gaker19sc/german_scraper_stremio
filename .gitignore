@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv
+venv/
+ENV/
+.env
+
+# Project specific
+debug_*.py
+test_*.py
+.aniworld/
+browser-profile/
