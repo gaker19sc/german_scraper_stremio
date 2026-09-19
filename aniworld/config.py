@@ -251,60 +251,46 @@ def build_provider_attempt_order(
     return tuple(ordered)
 
 
+# Use a consistent Chrome 124 UA for providers to match curl_cffi impersonation
+# This prevents 403s and "click twice" issues.
+CHROME_124_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+
 PROVIDER_HEADERS_D = {
     "Vidmoly": {"Referer": "https://vidmoly.biz"},
-    # Doodstream signs the direct link against the requesting client, so the
-    # download must reuse the same User-Agent the extractor sent.
     "Doodstream": {
-        "User-Agent": DEFAULT_USER_AGENT,
+        "User-Agent": CHROME_124_UA,
         "Referer": "https://dood.li/",
     },
     "VOE": {
-        "User-Agent": DEFAULT_USER_AGENT,
+        "User-Agent": CHROME_124_UA,
         "Accept": "*/*",
         "Accept-Language": "en-US,en;q=0.5",
-        "Accept-Encoding": "gzip, deflate",
-        "Connection": "keep-alive",
         "Referer": "https://voe.sx/",
-        "Origin": "https://voe.sx",
     },
-    "LoadX": {"Accept": "*/*"},
     "Cineby": {"Referer": "https://www.cineby.at/"},
-    "Filemoon": {"User-Agent": DEFAULT_USER_AGENT, "Referer": "https://filemoon.to"},
-    "Luluvdo": {
-        "User-Agent": LULUVDO_USER_AGENT,
-        "Accept-Language": "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Origin": "https://luluvdo.com",
-        "Referer": "https://luluvdo.com/",
+    "MegaKino": {
+        "User-Agent": CHROME_124_UA,
+        "Referer": "https://gxplayer.xyz/",
     },
+    "Filemoon": {"User-Agent": CHROME_124_UA, "Referer": "https://filemoon.to"},
 }
 
 PROVIDER_HEADERS_W = {
     "Vidmoly": {"Referer": "https://vidmoly.biz"},
-    # Doodstream signs the direct link against the requesting client, so the
-    # download must reuse the same User-Agent the extractor sent.
     "Doodstream": {
-        "User-Agent": DEFAULT_USER_AGENT,
+        "User-Agent": CHROME_124_UA,
         "Referer": "https://dood.li/",
     },
     "VOE": {
-        "User-Agent": DEFAULT_USER_AGENT,
+        "User-Agent": CHROME_124_UA,
         "Accept": "*/*",
-        "Accept-Language": "en-US,en;q=0.5",
-        "Accept-Encoding": "gzip, deflate",
-        "Connection": "keep-alive",
         "Referer": "https://voe.sx/",
-        "Origin": "https://voe.sx",
     },
-    "LoadX": {"Accept": "*/*"},
-    "Cineby": {"Referer": "https://www.cineby.at/"},
-    "Filemoon": {"User-Agent": DEFAULT_USER_AGENT, "Referer": "https://filemoon.to"},
-    "Luluvdo": {
-        "User-Agent": LULUVDO_USER_AGENT,
-        "Accept-Language": "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Origin": "https://luluvdo.com",
-        "Referer": "https://luluvdo.com/",
+    "MegaKino": {
+        "User-Agent": CHROME_124_UA,
+        "Referer": "https://gxplayer.xyz/",
     },
+    "Filemoon": {"User-Agent": CHROME_124_UA, "Referer": "https://filemoon.to"},
 }
 
 
@@ -455,7 +441,7 @@ SERIENSTREAM_EPISODE_PATTERN = re.compile(
 )
 
 MEGAKINO_SERIES_PATTERN = re.compile(
-    r"^https?://(?:www\.)?megakino[\w-]*\.[^/]+/(?:action|films|serials|multfilm)/[^?#]+(?:\.html)?/?(?:#mkep=\d+)?$",
+    r"^https?://(?:www\.)?megakino[\w-]*\.[^/]+/[^/]+/[^?#]+(?:\.html)?/?(?:#mkep=\d+)?$",
     re.IGNORECASE,
 )
 

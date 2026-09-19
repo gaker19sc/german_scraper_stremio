@@ -807,6 +807,8 @@ class MegaKinoEpisode:
             return {}
         index = self.__episode_index or 1
         episode = next((ep for ep in episodes if ep["number"] == index), None)
+        if episode:
+            logger.info(f"MegaKino: Selected episode {index} ('{episode['label']}')")
         return episode["providers"] if episode else {}
 
     def __extract_provider_data(self):

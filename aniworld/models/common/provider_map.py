@@ -15,6 +15,8 @@ except ImportError:
 # First match wins, so order the more specific entries first.
 _ALIASES = (
     ("voe", "VOE"),
+    ("veev", "VOE"),
+    ("moflix-stream", "VOE"),
     ("dood", "Doodstream"),
     ("vidmoly", "Vidmoly"),
     ("vidoza", "Vidoza"),

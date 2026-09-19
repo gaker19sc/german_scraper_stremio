@@ -57,6 +57,7 @@ _captcha_state = None  # None or {"url": ..., "started_at": ..., "solved": bool}
 
 # Serialise concurrent solve attempts
 _captcha_lock = _threading.Lock()
+_browser_lock = _threading.Lock()
 
 # ---------------------------------------------------------------------------
 # Ad-overlay defence
@@ -418,9 +419,6 @@ def _stealth_launch_args(offscreen: bool) -> list:
         "--disable-dev-shm-usage",
         "--no-sandbox",
         "--disable-gpu",
-        "--disable-software-rasterizer",
-        "--js-flags='--max-old-space-size=256'",
-        "--single-process",
     ]
     if offscreen:
         args.insert(0, "--window-position=-32000,-32000")
@@ -2024,6 +2022,115 @@ def playwright_get_cineby_stream_url(url: str, timeout: int = 40) -> str:
         return final_url
     except Exception as e:
         logger.error(f"Failed to capture cineby stream URL: {e}")
+        return None
+
+def playwright_get_veev_stream_url(url: str, timeout: int = 50) -> str:
+    """Open the Veev/VOE player and capture the playable URL.
+    Handles 'fake' play buttons by clicking them multiple times aggressively and smashing overlays.
+    """
+    try:
+        from patchright.sync_api import sync_playwright
+    except ImportError:
+        raise RuntimeError("patchright is not installed.")
+
+    from ..logger import get_logger
+    logger = get_logger(__name__)
+    final_url = None
+
+    try:
+        with sync_playwright() as p:
+            # Low memory args
+            args = ["--disable-gpu", "--no-sandbox", "--disable-dev-shm-usage"]
+            browser = p.chromium.launch(headless=True, args=args)
+            context = browser.new_context(viewport={"width": 1280, "height": 720})
+
+            page = context.new_page()
+
+            def _capture(response):
+                nonlocal final_url
+                if final_url: return
+                u = response.url
+                # Skip common noise
+                if any(x in u.lower() for x in ["blank.mp4", "/analytics/", "google-analytics", "doubleclick"]):
+                    return
+
+                ctype = response.headers.get("content-type", "").lower()
+
+                # 1. Check for video content type (most reliable for extensionless streams)
+                if "video/" in ctype or "application/x-mpegurl" in ctype or "application/vnd.apple.mpegurl" in ctype:
+                    final_url = u
+                    return
+
+                # 2. Check for obvious media extensions
+                if any(ext in u.lower() for ext in [".m3u8", ".mp4", "playlist.m3u8"]):
+                    final_url = u
+                    return
+
+                # 3. Check for specific Veev/VOE CDN patterns
+                if "veevcdn.co" in u.lower() or "cloudwi" in u.lower():
+                    # The user mentioned a link starting with /3FGJ... or /hls/
+                    if any(x in u for x in ["/3", "/hls/", "/video/", "/segments/"]):
+                         final_url = u
+                         return
+
+            page.on("response", _capture)
+            logger.info(f"Veev Sniffer: Opening embed {url}")
+
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=25000)
+            except Exception:
+                pass
+
+            # Initial wait for the app to load
+            page.wait_for_timeout(3500)
+
+            # OVERLAY SMASHER: Remove invisible elements that block the play button
+            try:
+                page.evaluate("""() => {
+                    const smasher = () => {
+                        document.querySelectorAll('div, a, span').forEach(el => {
+                            const style = window.getComputedStyle(el);
+                            if ((parseInt(style.zIndex) > 50) ||
+                                (style.position === 'fixed' && (el.offsetWidth > window.innerWidth * 0.5))) {
+                                if (!el.querySelector('video')) el.remove();
+                            }
+                        });
+                    };
+                    smasher();
+                    setTimeout(smasher, 1500);
+                }""")
+            except Exception:
+                pass
+
+            # Multi-click logic to bypass "3-click" protection
+            # We use 8 clicks with longer intervals
+            for i in range(8):
+                if final_url: break
+                try:
+                    # Click in the center where the play button usually is
+                    # Move slightly each time to ensure we hit it
+                    x, y = 640 + (i % 3 * 15), 360 + (i // 3 * 15)
+                    page.mouse.click(x, y)
+                    logger.info(f"Veev interaction click {i+1} performed at ({x}, {y})")
+                    page.wait_for_timeout(2500)
+
+                    # Try clicking specific play button if we can find it
+                    if i == 2:
+                         page.evaluate("() => { const b = document.querySelector('.cc-play, .plyr__play-large, button.plyr__control--overlaid'); if(b) b.click(); }")
+                except Exception:
+                    pass
+
+            deadline = _time.time() + timeout
+            while _time.time() < deadline and not final_url:
+                page.wait_for_timeout(1000)
+
+            browser.close()
+
+        if final_url:
+            logger.info(f"Captured Veev/VOE stream URL: {final_url[:60]}...")
+        return final_url
+    except Exception as e:
+        logger.error(f"Failed to capture Veev stream URL: {e}")
         return None
 
 

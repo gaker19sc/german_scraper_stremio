@@ -1,119 +1,204 @@
 import re
 import niquests
-from typing import List, Dict, Optional, Any
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import List, Dict, Optional, Any, Set
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
+from urllib.parse import urlparse
 from aniworld.search import query_s_to, query_filmpalast, query_megakino, query_kinox
 from aniworld.models.s_to.episode import SerienstreamEpisode
 from aniworld.models.filmpalast_to.episode import FilmPalastEpisode
 from aniworld.models.megakino.series import MegaKinoEpisode
 from aniworld.models.kinox.series import KinoxEpisode
-from aniworld.config import logger, Audio
+from aniworld.config import logger, Audio, DEFAULT_USER_AGENT, PROVIDER_HEADERS_W
 
 CINEMETA_URL = "https://v3-cinemeta.strem.io/meta/{type}/{id}.json"
+TMDB_PROXY = "https://db.wingsdatabase.com/3/find/{id}?external_source=imdb_id&language=de-DE"
+
+METADATA_CACHE = {}
+GERMAN_TITLE_CACHE = {}
 
 def get_metadata(media_type: str, imdb_id: str) -> Optional[Dict]:
-    """Fetch metadata from Cinemeta."""
+    """Fetch metadata from Cinemeta with caching."""
+    cache_key = f"{media_type}_{imdb_id}"
+    if cache_key in METADATA_CACHE:
+        return METADATA_CACHE[cache_key]
+
     url = CINEMETA_URL.format(type=media_type, id=imdb_id)
     try:
         response = niquests.get(url, timeout=10)
         response.raise_for_status()
-        return response.json().get("meta")
+        meta = response.json().get("meta")
+        if meta:
+            METADATA_CACHE[cache_key] = meta
+        return meta
     except Exception as e:
         logger.error(f"Failed to fetch metadata for {imdb_id}: {e}")
         return None
 
+def get_german_title(media_type: str, imdb_id: str) -> Optional[str]:
+    """Fetch German title from TMDB via proxy."""
+    if imdb_id in GERMAN_TITLE_CACHE:
+        return GERMAN_TITLE_CACHE[imdb_id]
+
+    url = TMDB_PROXY.format(id=imdb_id)
+    try:
+        response = niquests.get(url, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+
+        results = data.get("movie_results") if media_type == "movie" else data.get("tv_results")
+        if results and len(results) > 0:
+            german_title = results[0].get("title") or results[0].get("name")
+            if german_title:
+                GERMAN_TITLE_CACHE[imdb_id] = german_title
+                return german_title
+    except Exception as e:
+        logger.debug(f"Failed to fetch German title for {imdb_id}: {e}")
+    return None
+
 def clean_for_match(t: str) -> str:
     """Lowercase and alphanumeric only for title comparison."""
+    if not t: return ""
+    t = re.sub(r'[\(\[].*?[\)\]]', '', t)
     return re.sub(r'\W+', '', t.lower())
 
-def find_best_matches(results: List[Dict], title: str, year: Optional[int] = None) -> List[str]:
-    """Find and prioritize the best matching URLs from search results."""
+def find_best_matches(results: List[Dict], title: str, year: Optional[int] = None, season: Optional[int] = None) -> List[str]:
+    """Find and prioritize the best matching URLs from search results with strict filtering."""
     if not results:
         return []
 
     title_clean = clean_for_match(title)
     candidates = []
 
-    # 1. Exact title match
+    # Sequel indicators to prevent false positives
+    sequel_indicators = [
+        "2", "3", "4", "5", "part", "teil", "sequel",
+        "vollverhext", "madchengegenjungs", "tohuwabohu", "einfachanders",
+        "next", "generation", "reboot", "remake"
+    ]
+
+    def is_strict_match(res_title: str) -> bool:
+        res_clean = clean_for_match(res_title)
+        if title_clean == res_clean: return True
+        for ind in sequel_indicators:
+            if ind in res_clean and ind not in title_clean:
+                return False
+
+        # For series, if a season is requested, ensure the title doesn't mention a DIFFERENT season
+        if season:
+            other_seasons = [f"staffel{s}" for s in range(1, 30) if s != season] + \
+                            [f"season{s}" for s in range(1, 30) if s != season]
+            for os in other_seasons:
+                if os in res_clean:
+                    return False
+
+        return title_clean in res_clean or res_clean in title_clean
+
+    if season:
+        season_markers = [f"staffel {season}", f"season {season}", f"staffel-{season}", f"season-{season}"]
+        for res in results:
+            res_title = res.get("title", "").lower()
+            if any(marker in res_title for marker in season_markers):
+                res_url = res.get("url") or res.get("link")
+                if res_url: candidates.append(res_url)
+
     for res in results:
         res_url = res.get("url") or res.get("link")
-        if not res_url: continue
+        if not res_url or res_url in candidates: continue
         if clean_for_match(res.get("title", "")) == title_clean:
             candidates.append(res_url)
 
-    # 2. Match title AND year
     if year:
         year_str = str(year)
         for res in results:
             res_url = res.get("url") or res.get("link")
             if not res_url or res_url in candidates: continue
             res_title = res.get("title", "")
-            if year_str in res_title and title_clean in clean_for_match(res_title):
+            if year_str in res_title and is_strict_match(res_title):
                 candidates.append(res_url)
 
-    # 3. Partial match
     for res in results:
         res_url = res.get("url") or res.get("link")
         if not res_url or res_url in candidates: continue
-        res_title_clean = clean_for_match(res.get("title", ""))
-        if title_clean in res_title_clean or res_title_clean in title_clean:
-            candidates.append(res_url)
-
-    # 4. Fallback to top results if they seem relevant
-    first_word = title.split()[0].lower()
-    for res in results[:3]:
-        res_url = res.get("url") or res.get("link")
-        if not res_url or res_url in candidates: continue
-        if first_word in res.get("title", "").lower():
+        if is_strict_match(res.get("title", "")):
             candidates.append(res_url)
 
     return candidates
 
-def extract_streams(episode_obj: Any, provider_site_name: str, meta_title: str) -> List[Dict]:
+def extract_streams(episode_obj: Any, provider_site_name: str, meta_title: str, binge_group: Optional[str] = None) -> List[Dict]:
     """Generic helper to extract streams from an episode model object."""
     streams = []
     try:
         provider_data = episode_obj.provider_data
-        if not provider_data:
-            return []
+        if not provider_data: return []
 
-        # Handle both plain dict and ProviderData object
         data_items = provider_data._data.items() if hasattr(provider_data, "_data") else provider_data.items()
 
         for (audio, subs), providers in data_items:
-            # Filter for German streams as requested
-            if audio.value != "German":
-                continue
+            if audio.value != "German": continue
 
             for name, redirect_url in providers.items():
                 try:
+                    # Filter out problematic mirrors
+                    if provider_site_name == "MegaKino" and name.lower() == "megakino":
+                        continue
+
                     episode_obj.selected_provider = name
                     episode_obj.selected_language = audio.value
                     direct_url = episode_obj.stream_url
+                    if not direct_url: continue
 
-                    streams.append({
-                        "name": f"{provider_site_name}\n{name}",
-                        "title": f"{meta_title}\n{audio.value}\n{name}",
-                        "url": direct_url
-                    })
-                except Exception as e:
-                    logger.debug(f"Failed to get stream for {name} on {provider_site_name}: {e}")
+                    # PRECISE HEADERS: Align UA with crawler to fix "click twice" issue
+                    headers = PROVIDER_HEADERS_W.get(name, {})
+                    ua = headers.get("User-Agent", DEFAULT_USER_AGENT)
+
+                    # DYNAMIC REFERER: Use the exact embed URL for CDN trust
+                    embed_url = getattr(episode_obj, "provider_url", direct_url)
+                    parsed_embed = urlparse(embed_url)
+                    origin = f"{parsed_embed.scheme}://{parsed_embed.netloc}"
+
+                    # SMART EXTENSION: Fix player recognition for HLS vs MP4
+                    is_hls = ".m3u8" in direct_url.lower() or "urlset" in direct_url.lower()
+                    if not any(ext in direct_url.lower() for ext in [".mp4", ".m3u8", ".ts"]):
+                        direct_url += "#.m3u8" if is_hls else "#.mp4"
+
+                    proxy_headers = {
+                        "request": {
+                            "User-Agent": ua,
+                            "Referer": embed_url,
+                            "Origin": origin,
+                            "Sec-Fetch-Mode": "cors",
+                            "Sec-Fetch-Site": "cross-site",
+                            "Accept": "*/*"
+                        }
+                    }
+
+                    stream_entry = {
+                        "name": f"[{provider_site_name}] {name}",
+                        "title": f"{meta_title} | {audio.value} | {name}",
+                        "url": direct_url,
+                        "behaviorHints": {
+                            "notWebReady": True,
+                            "proxyHeaders": proxy_headers
+                        }
+                    }
+
+                    if binge_group:
+                        stream_entry["behaviorHints"]["bingeGroup"] = binge_group
+
+                    streams.append(stream_entry)
+                except Exception:
+                    pass
     except Exception as e:
         logger.error(f"Error extracting streams from {provider_site_name}: {e}")
     return streams
 
 def fetch_movie_site_streams(site_name: str, query_fn: Any, episode_cls: Any, title: str, year: Optional[int]) -> List[Dict]:
     """Search and extract streams for a movie from a single site."""
-    logger.info(f"Checking {site_name} for movie: {title}")
     try:
         results = query_fn(title)
-
-        # Retry with simplified title if needed
         if not results and ":" in title:
             results = query_fn(title.split(":")[0])
-
-        if not results:
-            return []
+        if not results: return []
 
         candidate_urls = find_best_matches(results, title, year)
         site_streams = []
@@ -123,86 +208,115 @@ def fetch_movie_site_streams(site_name: str, query_fn: Any, episode_cls: Any, ti
                 streams = extract_streams(episode, site_name, title)
                 if streams:
                     site_streams.extend(streams)
-                    break # Found valid streams on this site
-            except Exception as e:
-                logger.error(f"Error processing {site_name} movie {url}: {e}")
+                    break
+            except Exception:
+                pass
         return site_streams
     except Exception as e:
         logger.error(f"Failed to query {site_name}: {e}")
         return []
 
 def get_movie_streams(imdb_id: str) -> List[Dict]:
-    """Scrape streams for a movie from multiple providers in parallel."""
+    """Scrape streams for a movie using parallel searches for English and German titles."""
     meta = get_metadata("movie", imdb_id)
     if not meta: return []
 
-    title = meta.get("name")
+    en_title = meta.get("name")
     year = int(meta.get("releaseInfo", 0)) if meta.get("releaseInfo") else None
+    de_title = get_german_title("movie", imdb_id)
+
+    titles_to_search = {en_title}
+    if de_title: titles_to_search.add(de_title)
 
     all_streams = []
-
-    # Provider configurations
     providers = [
-        ("Filmpalast", query_filmpalast, FilmPalastEpisode),
         ("MegaKino", query_megakino, MegaKinoEpisode),
+        ("Filmpalast", query_filmpalast, FilmPalastEpisode),
         ("Kinox", query_kinox, KinoxEpisode),
     ]
 
-    with ThreadPoolExecutor(max_workers=len(providers)) as executor:
-        futures = {executor.submit(fetch_movie_site_streams, site, q_fn, cls, title, year): site for site, q_fn, cls in providers}
-        for future in as_completed(futures):
-            all_streams.extend(future.result())
+    with ThreadPoolExecutor(max_workers=len(providers) * len(titles_to_search)) as executor:
+        futures = []
+        for title in titles_to_search:
+            for site, q_fn, cls in providers:
+                futures.append(executor.submit(fetch_movie_site_streams, site, q_fn, cls, title, year))
+
+        try:
+            for future in as_completed(futures, timeout=12):
+                all_streams.extend(future.result())
+                if len(all_streams) >= 6: break
+        except TimeoutError:
+            logger.warning("Scraping timed out for some providers")
 
     return all_streams
 
-def fetch_series_site_streams(site_name: str, title: str, season: int, episode_num: int) -> List[Dict]:
+def fetch_series_site_streams(site_name: str, title: str, season: int, episode_num: int, binge_group: str) -> List[Dict]:
     """Search and extract streams for a series from a single site."""
     try:
         if site_name == "Serienstream":
             results = query_s_to(title)
             if not results: return []
-            links = find_best_matches(results, title)
+            links = find_best_matches(results, title, season=season)
             for link in links[:1]:
                 series_url = f"https://serienstream.to{link}" if not link.startswith("http") else link
                 ep_url = f"{series_url.rstrip('/')}/staffel-{season}/episode-{episode_num}"
-                episode = SerienstreamEpisode(url=ep_url)
-                return extract_streams(episode, site_name, title)
+                try:
+                    episode = SerienstreamEpisode(url=ep_url)
+                    return extract_streams(episode, site_name, title, binge_group)
+                except Exception: pass
+
+        elif site_name == "MegaKino":
+            results = query_megakino(f"{title} Staffel {season}")
+            if not results: results = query_megakino(title)
+            if not results: return []
+
+            urls = find_best_matches(results, title, season=season)
+            for url in urls[:1]:
+                ep_url = f"{url}#mkep={episode_num}"
+                try:
+                    episode = MegaKinoEpisode(ep_url)
+                    return extract_streams(episode, site_name, title, binge_group)
+                except Exception: pass
 
         elif site_name == "Kinox":
             results = query_kinox(title)
             if not results: return []
-            urls = find_best_matches(results, title)
+            urls = find_best_matches(results, title, season=season)
             for url in urls[:1]:
                 ep_url = f"{url.split('?')[0]}?s={season}&e={episode_num}"
-                episode = KinoxEpisode(ep_url)
-                return extract_streams(episode, site_name, title)
-
-        elif site_name == "MegaKino":
-            results = query_megakino(title)
-            if not results: return []
-            urls = find_best_matches(results, title)
-            for url in urls[:1]:
-                ep_url = f"{url}#mkep={episode_num}"
-                episode = MegaKinoEpisode(ep_url)
-                return extract_streams(episode, site_name, title)
+                try:
+                    episode = KinoxEpisode(ep_url)
+                    return extract_streams(episode, site_name, title, binge_group)
+                except Exception: pass
     except Exception as e:
         logger.error(f"Error fetching from {site_name}: {e}")
     return []
 
 def get_series_streams(imdb_id: str, season: int, episode_num: int) -> List[Dict]:
-    """Scrape streams for a series episode from multiple providers in parallel."""
+    """Scrape streams for a series episode using parallel searches for English and German titles."""
     pure_imdb_id = imdb_id.split(":")[0]
     meta = get_metadata("series", pure_imdb_id)
     if not meta: return []
 
-    title = meta.get("name")
+    en_title = meta.get("name")
+    de_title = get_german_title("series", pure_imdb_id)
+    titles_to_search = {en_title}
+    if de_title: titles_to_search.add(de_title)
+
     all_streams = []
+    binge_group = f"{pure_imdb_id}"
+    sites = ["Serienstream", "MegaKino", "Kinox"]
 
-    sites = ["Serienstream", "Kinox", "MegaKino"]
+    with ThreadPoolExecutor(max_workers=len(sites) * len(titles_to_search)) as executor:
+        futures = []
+        for title in titles_to_search:
+            for site in sites:
+                futures.append(executor.submit(fetch_series_site_streams, site, title, season, episode_num, binge_group))
 
-    with ThreadPoolExecutor(max_workers=len(sites)) as executor:
-        futures = {executor.submit(fetch_series_site_streams, site, title, season, episode_num): site for site in sites}
-        for future in as_completed(futures):
-            all_streams.extend(future.result())
+        try:
+            for future in as_completed(futures, timeout=12):
+                all_streams.extend(future.result())
+        except TimeoutError:
+            logger.warning("Scraping timed out for some providers")
 
     return all_streams

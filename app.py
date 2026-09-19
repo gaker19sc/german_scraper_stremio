@@ -12,7 +12,7 @@ MANIFEST = {
     "id": ADDON_ID,
     "version": VERSION,
     "name": "German Scraper",
-    "description": "Provides German streams from Filmpalast, Serienstream, MegaKino, and Kinox.",
+    "description": "Fast German streams from Filmpalast, Serienstream, MegaKino, and Kinox.",
     "logo": "https://www.stremio.com/static/images/stremio-logo.png",
     "resources": ["stream"],
     "types": ["movie", "series"],
@@ -54,6 +54,7 @@ def get_stream(type: str, id: str):
     seen_urls = set()
     for s in streams:
         if s.get("url") and s["url"] not in seen_urls:
+            logger.info(f"Adding stream for {id}: {s.get('name')} -> {s.get('url')}")
             unique_streams.append(s)
             seen_urls.add(s["url"])
 

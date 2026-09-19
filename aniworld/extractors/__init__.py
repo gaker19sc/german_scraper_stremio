@@ -15,3 +15,9 @@ for _, module_name, _ in pkgutil.iter_modules([str(provider_path)]):
 
 # Example usage:
 # provider_functions["get_direct_link_from_voe"](url)
+
+# Add Moflix fallback if needed (Moflix model handles its own redirection)
+def get_direct_link_from_moflix(url):
+    return url
+
+provider_functions["get_direct_link_from_moflix"] = get_direct_link_from_moflix

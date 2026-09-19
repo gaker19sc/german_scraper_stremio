@@ -101,7 +101,7 @@ def decode_voe_string(encoded):
 
 
 def extract_voe_source_from_html(html):
-    """Extract VOE video source — tries all known encoding variants."""
+    """Extract VOE video source — prefers HLS for better streaming reliability."""
     # Variant 1: <script type="application/json"> with encoded payload
     try:
         script_blocks = re.findall(
@@ -115,7 +115,8 @@ def extract_voe_source_from_html(html):
                 decoded = decode_voe_string(
                     encoded_text.encode().decode("unicode_escape")
                 )
-                source = decoded.get("source")
+                # PREFER HLS for Stremio reliability (fixes the 10s skip issue)
+                source = decoded.get("hls") or decoded.get("source")
                 if source:
                     return source
             except (ValueError, UnicodeDecodeError):
@@ -128,7 +129,7 @@ def extract_voe_source_from_html(html):
         m = B64_PATTERN.search(html)
         if m:
             decoded = decode_voe_string(m.group(1))
-            source = decoded.get("source")
+            source = decoded.get("hls") or decoded.get("source")
             if source:
                 return source
     except Exception:
